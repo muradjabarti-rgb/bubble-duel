@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Bubble Duel — Live</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin:0; padding:0; }
+  html, body {
+    height: 100%; overflow: hidden; touch-action: none;
+    background: #1a2130;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  #app { display:flex; flex-direction:column; align-items:center; height:100%; color:#f2ede2; padding-top: 8px;}
+  #gameTitle { font-weight: 700; font-size: 20px; color: #e8a33d; margin-bottom: 2px; }
+  #status { font-size: 12px; opacity: 0.7; text-align:center; padding: 4px 14px 8px; max-width: 340px; }
+  #hud { display:flex; justify-content:center; align-items:center; gap: 10px; width:100%; max-width: 360px; padding: 0 10px 10px; }
+  .scorepill { display:flex; align-items:center; gap: 6px; padding: 5px 12px; border-radius: 999px;
+    font-size: 12.5px; font-weight: 600; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); }
+  .scorepill .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .scorepill.me .dot { background: #c1502e; }
+  .scorepill.opp .dot { background: #3b5ba5; }
+  #boards { display:flex; gap: 0; position: relative; }
+  .board-wrap { position: relative; padding: 0 3px; }
+  .board-label { text-align:center; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.75; padding-bottom: 4px; font-weight: 600; }
+  #meridian { position: absolute; top: 26px; bottom: 0; left: 50%; transform: translateX(-50%); width: 1px;
+    background: repeating-linear-gradient(to bottom, rgba(224,163,61,0.5) 0 4px, transparent 4px 9px); z-index: 1; }
+  canvas { background: #212a3d; border-radius: 12px; display:block; touch-action:none;
+    box-shadow: inset 0 0 0 1px rgba(224,163,61,0.12); }
+  #overlay { position: fixed; inset: 0; background: rgba(20,25,38,0.96);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; padding:24px; gap:16px; z-index: 5; }
+  #overlay.hidden { display:none; }
+  #overlay h2 { font-weight: 700; color:#e8a33d; font-size:24px; }
+  #overlay p { max-width: 280px; font-size: 13.5px; opacity: 0.75; line-height: 1.5; }
+  button { font-family: inherit; border:none; cursor:pointer;
+    background: linear-gradient(135deg, #c1502e, #e8a33d); color:#1a2130;
+    padding: 13px 30px; border-radius:999px; font-size:14px; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.06em; box-shadow: 0 8px 20px rgba(193,80,46,0.35); }
+  button:disabled { opacity: 0.5; }
+  button:active { transform: scale(0.97); }
+  .spinner { width: 28px; height: 28px; border: 3px solid rgba(255,255,255,0.2); border-top-color: #e8a33d;
+    border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="gameTitle">Bubble Duel</div>
+  <div id="status">Not connected</div>
+  <div id="hud">
+    <span class="scorepill me"><span class="dot"></span><span id="meScore">You: 0</span></span>
+    <span style="font-style:italic;opacity:0.55;font-size:13px;">vs</span>
+    <span class="scorepill opp"><span class="dot"></span><span id="oppScore">Opponent: 0</span></span>
+  </div>
+  <div id="voiceRow" style="display:none; align-items:center; gap:8px; padding-bottom:6px;">
+    <button id="voiceBtn" style="padding:8px 18px; font-size:12px;">🎤 Enable Voice</button>
+    <span id="voiceStatus" style="font-size:11px; opacity:0.6;"></span>
+  </div>
+  <audio id="remoteAudio" autoplay playsinline></audio>
+  <div id="boards">
+    <div id="meridian"></div>
+    <div class="board-wrap">
+      <div class="board-label">You</div>
+      <canvas id="gameMe"></canvas>
+    </div>
+    <div class="board-wrap">
+      <div class="board-label">Opponent</div>
+      <canvas id="gameOpp"></canvas>
+    </div>
+  </div>
+</div>
+<div id="overlay">
+  <h2 id="ovTitle">Bubble Duel — Live</h2>
+  <p id="ovText">Real live 2-player. Tap below to find an opponent. Keep this page open on two devices (or two browser tabs) to test it.</p>
+  <button id="startBtn">Find Opponent</button>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ====== CONFIG — filled in with your actual project values ======
+  const SUPABASE_URL = 'https://iqcbbtjzwtmpqaswfkgs.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_lKW8jgwXQfqvAwegZNXrLQ_0Jig-OEx';
+  // ==================================================================
+
+  if(!window.supabase){
+    document.getElementById('status').textContent = 'Could not load network library — check your internet connection and reload.';
+    document.getElementById('startBtn').disabled = true;
+    return;
+  }
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const myId = crypto.randomUUID();
+
+  const W = 160, H = 460;
+  const COLORS = ['#c1502e','#e8a33d','#2f8f6f','#3b5ba5','#b25dc9'];
+  const R = 11;
+  const COLS = 6;
+  const ROW_H = R * 1.73;
+  const SPEED = 12;
+
+  function setStatus(t){ document.getElementById('status').textContent = t; }
+
+  function makeGame(canvasId, interactive){
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    canvas.width = W; canvas.height = H;
+    const SHOOTER_X = W/2, SHOOTER_Y = H - 20;
+
+    let grid, shooterColor, nextColor, flying, score, running;
+    let aiming = false, aimAngle = -Math.PI/2;
+
+    function colOffset(row){ return (row % 2 === 1) ? R : 0; }
+    function cellPos(row,col){ return { x: 6+R+col*(R*2)+colOffset(row), y: 6+R+row*ROW_H }; }
+    function maxCols(row){ return (row % 2 === 1) ? COLS-1 : COLS; }
+
+    function initGrid(seedColors){
+      grid = [];
+      const rows = 10;
+      let idx = 0;
+      for(let r=0;r<rows;r++){
+        grid.push(new Array(COLS).fill(null));
+        if(r < 4){
+          for(let c=0;c<maxCols(r);c++){
+            const color = seedColors ? seedColors[idx] : COLORS[Math.floor(Math.random()*COLORS.length)];
+            grid[r][c] = { color };
+            idx++;
+          }
+        }
+      }
+    }
+    function serializeInitialGrid(){
+      // flatten current top rows into a color list, used so both sides start identical
+      const out = [];
+      for(let r=0;r<4;r++) for(let c=0;c<maxCols(r);c++) out.push(grid[r][c].color);
+      return out;
+    }
+    function randomColor(){ return COLORS[Math.floor(Math.random()*COLORS.length)]; }
+    function neighborsOf(r,c){
+      const odd = r % 2 === 1;
+      const deltas = odd ? [[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]] : [[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]];
+      const out = [];
+      for(const [dr,dc] of deltas){ const nr=r+dr, nc=c+dc; if(nr>=0 && nr<grid.length && nc>=0 && nc<COLS) out.push([nr,nc]); }
+      return out;
+    }
+    function floodMatch(r,c,color){
+      const seen = new Set(); const stack=[[r,c]]; const matched=[];
+      while(stack.length){
+        const [cr,cc] = stack.pop(); const key = cr+'_'+cc;
+        if(seen.has(key)) continue; seen.add(key);
+        const cell = grid[cr] ? grid[cr][cc] : null;
+        if(!cell || cell.color !== color) continue;
+        matched.push([cr,cc]);
+        for(const n of neighborsOf(cr,cc)) stack.push(n);
+      }
+      return matched;
+    }
+    function dropFloating(){
+      const connected = new Set(); const stack=[];
+      for(let c=0;c<COLS;c++){ if(grid[0][c]) stack.push([0,c]); }
+      while(stack.length){
+        const [cr,cc]=stack.pop(); const key=cr+'_'+cc;
+        if(connected.has(key)) continue; connected.add(key);
+        for(const [nr,nc] of neighborsOf(cr,cc)){
+          if(grid[nr][nc] && !connected.has(nr+'_'+nc)) stack.push([nr,nc]);
+        }
+      }
+      let dropped = 0;
+      for(let r=0;r<grid.length;r++) for(let c=0;c<COLS;c++){
+        if(grid[r][c] && !connected.has(r+'_'+c)){ grid[r][c]=null; dropped++; }
+      }
+      return dropped;
+    }
+    function nearestCell(x,y){
+      let best=null, bestDist=Infinity;
+      for(let r=0;r<grid.length;r++) for(let c=0;c<maxCols(r);c++){
+        const p = cellPos(r,c); const d=(p.x-x)**2+(p.y-y)**2;
+        if(d<bestDist){ bestDist=d; best={r,c}; }
+      }
+      return best;
+    }
+    function setScore(v){
+      score = v;
+      document.getElementById(interactive ? 'meScore' : 'oppScore').textContent =
+        (interactive ? 'You: ' : 'Opponent: ') + score;
+    }
+    function applySettle(targetR, targetC, color){
+      if(grid[targetR][targetC]){
+        let found=null;
+        for(const [nr,nc] of neighborsOf(targetR,targetC)){ if(!grid[nr][nc]){ found={r:nr,c:nc}; break; } }
+        if(found){ targetR = found.r; targetC = found.c; }
+      }
+      grid[targetR][targetC] = { color };
+      const matches = floodMatch(targetR, targetC, color);
+      let gained = 0;
+      if(matches.length >= 3){
+        for(const [mr,mc] of matches) grid[mr][mc] = null;
+        gained += matches.length*10;
+        const dropped = dropFloating();
+        gained += dropped*15;
+      }
+      setScore(score + gained);
+      let anyLeft = false;
+      for(let r=0;r<grid.length;r++) for(let c=0;c<COLS;c++) if(grid[r][c]) anyLeft = true;
+      if(!anyLeft) initGrid();
+      return { targetR, targetC };
+    }
+    function settleFlying(onLocalSettle){
+      const near = nearestCell(flying.x, flying.y);
+      const result = applySettle(near.r, near.c, flying.color);
+      if(interactive && onLocalSettle) onLocalSettle(result.targetR, result.targetC, flying.color, score);
+      flying = null;
+      shooterColor = nextColor;
+      nextColor = randomColor();
+    }
+    function drawBubble(x,y,color,radius){
+      ctx.save(); ctx.beginPath(); ctx.arc(x,y,radius,0,Math.PI*2); ctx.closePath(); ctx.clip();
+      ctx.fillStyle = color; ctx.fillRect(x-radius, y-radius, radius*2, radius*2);
+      const stripe = Math.max(2, radius*0.32);
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = stripe;
+      for(let i=-3;i<=3;i++){ ctx.beginPath(); ctx.moveTo(x-radius*2+i*stripe*2, y-radius*1.6); ctx.lineTo(x-radius*2+i*stripe*2+radius*3.2, y+radius*1.6); ctx.stroke(); }
+      ctx.strokeStyle = 'rgba(0,0,0,0.14)';
+      for(let i=-3;i<=3;i++){ ctx.beginPath(); ctx.moveTo(x+radius*2-i*stripe*2, y-radius*1.6); ctx.lineTo(x+radius*2-i*stripe*2-radius*3.2, y+radius*1.6); ctx.stroke(); }
+      ctx.restore();
+      ctx.beginPath(); ctx.arc(x,y,radius,0,Math.PI*2); ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x-radius*0.32,y-radius*0.32,radius*0.26,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,0.3)'; ctx.fill();
+    }
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      for(let r=0;r<grid.length;r++) for(let c=0;c<maxCols(r);c++){
+        const cell = grid[r][c];
+        if(cell){ const p=cellPos(r,c); drawBubble(p.x,p.y,cell.color,R-1); }
+      }
+      if(flying) drawBubble(flying.x, flying.y, flying.color, R-1);
+      if(aiming && !flying && interactive){
+        ctx.save(); ctx.strokeStyle='rgba(244,240,230,0.5)'; ctx.setLineDash([4,6]); ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(SHOOTER_X,SHOOTER_Y);
+        ctx.lineTo(SHOOTER_X+Math.cos(aimAngle)*180, SHOOTER_Y+Math.sin(aimAngle)*180);
+        ctx.stroke(); ctx.restore();
+      }
+      if(shooterColor) drawBubble(SHOOTER_X, SHOOTER_Y, shooterColor, R-1);
+    }
+    function fire(){
+      if(flying || !running) return;
+      flying = { x:SHOOTER_X, y:SHOOTER_Y, dx:Math.cos(aimAngle)*SPEED, dy:Math.sin(aimAngle)*SPEED, color: shooterColor };
+    }
+    function tick(onLocalSettle){
+      if(flying){
+        flying.x += flying.dx; flying.y += flying.dy;
+        if(flying.x - R < 0){ flying.x = R; flying.dx *= -1; }
+        if(flying.x + R > W){ flying.x = W-R; flying.dx *= -1; }
+        let collided = flying.y - R < 6;
+        if(!collided){
+          outer:
+          for(let r=0;r<grid.length;r++) for(let c=0;c<maxCols(r);c++){
+            if(grid[r][c]){
+              const p = cellPos(r,c);
+              if(Math.hypot(p.x-flying.x,p.y-flying.y) < R*1.85){ collided=true; break outer; }
+            }
+          }
+        }
+        if(collided) settleFlying(onLocalSettle);
+      }
+      draw();
+    }
+    function pointFromEvent(e){
+      const rect = canvas.getBoundingClientRect();
+      return { x:(e.clientX-rect.left)*(W/rect.width), y:(e.clientY-rect.top)*(H/rect.height) };
+    }
+    function updateAim(x,y){
+      let angle = Math.atan2(y-SHOOTER_Y, x-SHOOTER_X);
+      const minAngle = -Math.PI+0.15, maxAngle=-0.15;
+      if(angle > 0) angle -= 2*Math.PI;
+      if(angle < minAngle) angle = minAngle;
+      if(angle > maxAngle) angle = maxAngle;
+      aimAngle = angle;
+    }
+    if(interactive){
+      canvas.addEventListener('pointerdown',(e)=>{
+        if(!running || flying) return;
+        canvas.setPointerCapture(e.pointerId);
+        aiming = true; const p = pointFromEvent(e); updateAim(p.x,p.y); draw();
+      });
+      canvas.addEventListener('pointermove',(e)=>{ if(!aiming) return; const p=pointFromEvent(e); updateAim(p.x,p.y); draw(); });
+      function release(){ if(!aiming) return; aiming=false; fire(); draw(); }
+      canvas.addEventListener('pointerup', release);
+      canvas.addEventListener('pointercancel', release);
+    }
+    function reset(seedColors){
+      initGrid(seedColors);
+      setScore(0);
+      shooterColor = interactive ? randomColor() : null;
+      nextColor = randomColor();
+      flying = null; aiming = false; aimAngle = -Math.PI/2;
+      running = true;
+      draw();
+    }
+    function stop(){ running = false; }
+
+    initGrid();
+    score = 0;
+    shooterColor = null;
+    running = false;
+    draw();
+
+    return { tick, reset, stop, applySettle, serializeInitialGrid, getScore: () => score, setScoreDirect: setScore };
+  }
+
+  const me = makeGame('gameMe', true);
+  const opp = makeGame('gameOpp', false);
+
+  let timeLeft = 60, timerId, rafId, channel, matched = false, roundStarted = false;
+
+  function loop(){
+    me.tick((r,c,color,score) => {
+      // broadcast my shot result so opponent's mirror updates
+      channel.send({ type: 'broadcast', event: 'shot', payload: { r, c, color, score } });
+    });
+    opp.tick();
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function startRound(seedColors){
+    roundStarted = true;
+    document.getElementById('overlay').classList.add('hidden');
+    me.reset(seedColors);
+    opp.reset(seedColors);
+    timeLeft = 60;
+    clearInterval(timerId);
+    timerId = setInterval(() => {
+      timeLeft--;
+      if(timeLeft <= 0) endRound();
+    }, 1000);
+    if(rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function endRound(){
+    me.stop(); opp.stop();
+    clearInterval(timerId);
+    cancelAnimationFrame(rafId);
+    const myScore = me.getScore(), oppScore = opp.getScore();
+    const winner = myScore > oppScore ? 'You win!' : (myScore < oppScore ? 'Opponent wins!' : "It's a tie!");
+    document.getElementById('ovTitle').textContent = winner;
+    document.getElementById('ovText').textContent = `Final score — You: ${myScore}, Opponent: ${oppScore}.`;
+    document.getElementById('startBtn').textContent = 'Find Opponent Again';
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('overlay').classList.remove('hidden');
+    matched = false;
+    roundStarted = false;
+    if(channel) supabase.removeChannel(channel);
+
+    // clean up voice chat for next match
+    if(pc){ pc.close(); pc = null; }
+    if(localStream){ localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+    voiceEnabled = false;
+    pendingOffer = null;
+    iceQueue = [];
+    document.getElementById('voiceRow').style.display = 'none';
+    document.getElementById('voiceBtn').textContent = '🎤 Enable Voice';
+    document.getElementById('voiceBtn').disabled = false;
+    setVoiceStatus('');
+  }
+
+  async function findOpponent(){
+    document.getElementById('startBtn').disabled = true;
+    setStatus('Connecting to matchmaking...');
+
+    const lobby = supabase.channel('bubble-duel-lobby');
+    const seenPeers = new Set();
+    let helloInterval = null;
+
+    function tryMatch(){
+      if(matched) return;
+      const ids = Array.from(seenPeers);
+      ids.push(myId);
+      ids.sort();
+      if(ids.length >= 2){
+        matched = true;
+        clearInterval(helloInterval);
+        const roomName = 'bd-room-' + ids[0] + '-' + ids[1];
+        const isHost = ids[0] === myId;
+        setStatus('Found opponent! (' + (isHost ? 'you are host' : 'joining host') + ')');
+        supabase.removeChannel(lobby);
+        joinRoom(roomName, isHost);
+      }
+    }
+
+    lobby.on('broadcast', { event: 'hello' }, ({ payload }) => {
+      if(payload.id !== myId){
+        seenPeers.add(payload.id);
+        setStatus('Connected. Waiting room: ' + (seenPeers.size + 1) + ' player(s) present.');
+        tryMatch();
+      }
+    });
+
+    lobby.subscribe((status, err) => {
+      setStatus('Lobby status: ' + status + (err ? (' — ' + err.message) : ''));
+      if(status === 'SUBSCRIBED'){
+        setStatus('Waiting for an opponent to join...');
+        lobby.send({ type: 'broadcast', event: 'hello', payload: { id: myId } });
+        // keep announcing ourselves periodically so anyone who joins slightly
+        // after us (or missed our first message) still finds us
+        helloInterval = setInterval(() => {
+          if(matched){ clearInterval(helloInterval); return; }
+          lobby.send({ type: 'broadcast', event: 'hello', payload: { id: myId } });
+        }, 1000);
+      }
+    });
+  }
+
+  function joinRoom(roomName, isHost){
+    setStatus(isHost ? 'Opponent found! Setting up match...' : 'Opponent found! Joining match...');
+    channel = supabase.channel(roomName);
+    let opponentReady = false;
+    window.__isHostForVoice = isHost;
+    document.getElementById('voiceRow').style.display = 'flex';
+    wireVoiceSignaling(isHost);
+
+    channel.on('broadcast', { event: 'shot' }, ({ payload }) => {
+      opp.applySettle(payload.r, payload.c, payload.color);
+      opp.setScoreDirect(payload.score);
+    });
+
+    channel.on('broadcast', { event: 'start' }, ({ payload }) => {
+      setStatus('Match live!');
+      startRound(payload.seedColors);
+    });
+
+    channel.on('broadcast', { event: 'ready' }, () => {
+      opponentReady = true;
+      maybeStart();
+    });
+
+    function maybeStart(){
+      if(isHost && opponentReady){
+        me.reset(); // generate this round's random board layout
+        const seed = me.serializeInitialGrid();
+        channel.send({ type: 'broadcast', event: 'start', payload: { seedColors: seed } });
+        setStatus('Match live!');
+        startRound(seed);
+      }
+    }
+
+    channel.subscribe((status, err) => {
+      setStatus('Room status: ' + status + (err ? (' — ' + err.message) : ''));
+      if(status === 'SUBSCRIBED'){
+        channel.send({ type: 'broadcast', event: 'ready', payload: { id: myId } });
+        if(isHost) maybeStart();
+        // retry in case the very first message was sent before the other side finished connecting
+        const retryId = setInterval(() => {
+          if(roundStarted) { clearInterval(retryId); return; }
+          channel.send({ type: 'broadcast', event: 'ready', payload: { id: myId } });
+          if(isHost) maybeStart();
+        }, 1200);
+      }
+    });
+  }
+
+  // ====== Voice chat (WebRTC, peer-to-peer, signaled over the same room channel) ======
+  let pc = null;
+  let localStream = null;
+  let voiceEnabled = false;
+  let iceQueue = [];
+
+  function setVoiceStatus(t){ document.getElementById('voiceStatus').textContent = t; }
+
+  function createPeerConnection(isHost){
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    pc.onicecandidate = (e) => {
+      if(e.candidate){
+        channel.send({ type: 'broadcast', event: 'voice-ice', payload: { candidate: e.candidate } });
+      }
+    };
+
+    pc.ontrack = (e) => {
+      const audioEl = document.getElementById('remoteAudio');
+      audioEl.srcObject = e.streams[0];
+      setVoiceStatus('Voice connected 🎧');
+    };
+
+    pc.onconnectionstatechange = () => {
+      if(pc.connectionState === 'connected') setVoiceStatus('Voice connected 🎧');
+      if(pc.connectionState === 'failed' || pc.connectionState === 'disconnected'){
+        setVoiceStatus('Voice disconnected');
+      }
+    };
+
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+  }
+
+  async function enableVoice(isHost){
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch(err){
+      setVoiceStatus('Mic permission denied — voice unavailable');
+      return;
+    }
+    voiceEnabled = true;
+    document.getElementById('voiceBtn').textContent = '🎤 Voice On';
+    document.getElementById('voiceBtn').disabled = true;
+    setVoiceStatus('Connecting voice...');
+
+    createPeerConnection(isHost);
+
+    if(isHost){
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+      channel.send({ type: 'broadcast', event: 'voice-offer', payload: { sdp: offer } });
+    } else {
+      channel.send({ type: 'broadcast', event: 'voice-request-offer', payload: {} });
+    }
+  }
+
+  function wireVoiceSignaling(isHost){
+    channel.on('broadcast', { event: 'voice-request-offer' }, async () => {
+      if(!voiceEnabled || !pc || pc.signalingState === 'closed') return;
+      // opponent asked us to (re)send our offer, e.g. they enabled voice after us
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, iceRestart: true });
+      await pc.setLocalDescription(offer);
+      channel.send({ type: 'broadcast', event: 'voice-offer', payload: { sdp: offer } });
+    });
+
+    channel.on('broadcast', { event: 'voice-offer' }, async ({ payload }) => {
+      if(!voiceEnabled){
+        // opponent is ready before we tapped the button — flip our button to prompt
+        setVoiceStatus('Opponent enabled voice — tap Enable Voice to join');
+        pendingOffer = payload.sdp;
+        return;
+      }
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+      flushIceQueue();
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      channel.send({ type: 'broadcast', event: 'voice-answer', payload: { sdp: answer } });
+    });
+
+    channel.on('broadcast', { event: 'voice-answer' }, async ({ payload }) => {
+      if(!pc) return;
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+      flushIceQueue();
+    });
+
+    channel.on('broadcast', { event: 'voice-ice' }, async ({ payload }) => {
+      if(!pc || !pc.remoteDescription){
+        iceQueue.push(payload.candidate);
+        return;
+      }
+      try { await pc.addIceCandidate(payload.candidate); } catch(e){ /* ignore benign race errors */ }
+    });
+  }
+
+  function flushIceQueue(){
+    while(iceQueue.length){
+      const c = iceQueue.shift();
+      pc.addIceCandidate(c).catch(()=>{});
+    }
+  }
+
+  let pendingOffer = null;
+
+  document.getElementById('voiceBtn').addEventListener('click', async () => {
+    const isHostFlag = window.__isHostForVoice;
+    await enableVoice(isHostFlag);
+    if(pendingOffer){
+      await pc.setRemoteDescription(new RTCSessionDescription(pendingOffer));
+      flushIceQueue();
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      channel.send({ type: 'broadcast', event: 'voice-answer', payload: { sdp: answer } });
+      pendingOffer = null;
+    }
+  });
+  // ====================================================================================
+
+  document.getElementById('startBtn').addEventListener('click', findOpponent);
+})();
+</script>
+</body>
+</html>
